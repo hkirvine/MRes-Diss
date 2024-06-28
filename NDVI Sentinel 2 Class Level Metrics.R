@@ -1,0 +1,204 @@
+# Install and load necessary libraries
+if (!requireNamespace("landscapemetrics", quietly = TRUE)) {
+  install.packages("landscapemetrics", dependencies = TRUE)
+}
+if (!requireNamespace("raster", quietly = TRUE)) {
+  install.packages("raster", dependencies = TRUE)
+}
+if (!requireNamespace("sf", quietly = TRUE)) {
+  install.packages("sf", dependencies = TRUE)
+}
+if (!requireNamespace("terra", quietly = TRUE)) {
+  install.packages("terra", dependencies = TRUE)
+}
+
+library(landscapemetrics)
+library(raster)
+library(sf)
+library(terra)
+
+# Set the working directory to the directory containing the classified NDVI GeoTIFF files
+setwd("here")
+
+# Define the exact filenames of the classified NDVI GeoTIFF files in the working directory
+filenames <- c(
+  "Sentinel2_NDVI_Class_2018.tif",
+  "Sentinel2_NDVI_Class_2019.tif",
+  "Sentinel2_NDVI_Class_2020.tif",
+  "Sentinel2_NDVI_Class_2021.tif",
+  "Sentinel2_NDVI_Class_2022.tif",
+  "Sentinel2_NDVI_Class_2023.tif"
+)
+
+print("Files to be processed:")
+print(filenames)
+
+# Function to load each raster file
+load_raster <- function(file_path) {
+  rast(file_path)
+}
+
+# Load all classified NDVI files
+classified_ndvi_list <- lapply(filenames, load_raster)
+
+# Check if the rasters were loaded correctly
+if (length(classified_ndvi_list) == 0) {
+  stop("No raster files were loaded.")
+}
+
+# Example: Print the first raster to verify
+if (!is.null(classified_ndvi_list[[1]])) {
+  print("First raster:")
+  print(classified_ndvi_list[[1]])
+} else {
+  stop("First raster is NULL. Check if the file exists and is readable.")
+}
+
+# Use terra's native functions to stack the rasters if needed
+# Here we assume they have the same extent and resolution
+classified_ndvi_stack <- rast(classified_ndvi_list)
+
+# Print the stack to verify
+print("Classified NDVI stack:")
+print(classified_ndvi_stack)
+
+# Convert the SpatRaster to a RasterLayer for compatibility with landscapemetrics
+classified_ndvi_raster <- as(classified_ndvi_stack, "Raster")
+
+# Inspect unique values before cleaning
+for (i in 1:nlayers(classified_ndvi_raster)) {
+  unique_values <- unique(values(classified_ndvi_raster[[i]]))
+  print(paste("Unique values in original layer", i, ":", toString(unique_values)))
+}
+
+# Assuming valid classification values are 1, 2, 3 (adjust if needed based on the inspection above)
+valid_classes <- c(1, 2, 3)
+
+# Clean the raster values to ensure only valid classes are kept
+cleaned_ndvi_raster <- calc(classified_ndvi_raster, fun = function(x) {
+  x[!x %in% valid_classes] <- NA
+  return(x)
+})
+
+# Inspect unique values after cleaning
+for (i in 1:nlayers(cleaned_ndvi_raster)) {
+  unique_values <- unique(values(cleaned_ndvi_raster[[i]]))
+  print(paste("Unique values in cleaned layer", i, ":", toString(unique_values)))
+}
+
+# Function to calculate landscape metrics for a specific class
+calculate_metric <- function(raster_layer, class_val, metric_function) {
+  # Create a binary raster where the class of interest is 1 and everything else is NA
+  class_raster <- calc(raster_layer, fun = function(x) {
+    ifelse(x == class_val, 1, NA)
+  })
+  # Calculate the specified metric for the binary raster
+  metric_function(class_raster)
+}
+
+# Calculate a specific metric for each layer and each class
+calculate_metrics_by_layer <- function(metric_function) {
+  lapply(1:nlayers(cleaned_ndvi_raster), function(i) {
+    layer_metrics <- lapply(valid_classes, function(class_val) {
+      calculate_metric(cleaned_ndvi_raster[[i]], class_val, metric_function)
+    })
+    names(layer_metrics) <- valid_classes
+    return(layer_metrics)
+  })
+}
+
+# Define the metric functions
+metric_functions <- list(
+  PD = lsm_c_pd,
+  AREA = lsm_c_area_mn,
+  NP = lsm_c_np,
+  LPI = lsm_c_lpi,
+  CA = lsm_c_ca,
+  AREA_MN = lsm_c_area_mn
+)
+
+# Calculate each metric separately
+metric_results <- list()
+for (metric_name in names(metric_functions)) {
+  metric_results[[metric_name]] <- calculate_metrics_by_layer(metric_functions[[metric_name]])
+  print(paste("Calculated", metric_name))
+}
+
+# Function to extract total values for a specific metric, class, and year
+extract_metric_values <- function(metric_list, metric_name) {
+  sapply(valid_classes, function(class_val) {
+    sapply(metric_list, function(layer_metrics) {
+      if (!is.null(layer_metrics[[as.character(class_val)]])) {
+        sum(layer_metrics[[as.character(class_val)]]$value, na.rm = TRUE)
+      } else {
+        NA
+      }
+    })
+  })
+}
+
+# Extract and organize metric values
+metric_values_list <- lapply(names(metric_results), function(metric_name) {
+  extract_metric_values(metric_results[[metric_name]], metric_name)
+})
+names(metric_values_list) <- names(metric_results)
+
+# Convert each metric values matrix to a data frame for easier handling
+metric_values_df_list <- lapply(metric_values_list, function(metric_values) {
+  df <- as.data.frame(metric_values)
+  colnames(df) <- as.character(valid_classes)  # Rename columns to match valid_classes
+  rownames(df) <- paste("Year", 2018:2023, sep = "_")
+  return(df)
+})
+
+# Calculate the change in each metric over time for each class
+change_in_metrics_list <- lapply(metric_values_df_list, function(df) {
+  change_df <- apply(df, 2, function(x) diff(x))
+  change_df <- as.data.frame(change_df)
+  rownames(change_df) <- paste("Change_from", 2018:2022, "to", 2019:2023, sep = "_")
+  return(change_df)
+})
+
+# Print the change in metrics over time for each class
+for (metric_name in names(metric_results)) {
+  change_df <- change_in_metrics_list[[metric_name]]
+  print(paste("Change in", metric_name, "over time for each class:"))
+  for (j in 1:length(valid_classes)) {
+    class_val <- valid_classes[j]
+    print(paste("Class", class_val, ":"))
+    for (i in 1:nrow(change_df)) {
+      print(paste(rownames(change_df)[i], ":", change_df[i, j]))
+    }
+  }
+}
+
+# Print the metric values data frames for debugging
+for (metric_name in names(metric_results)) {
+  print(paste(metric_name, "values:"))
+  print(metric_values_df_list[[metric_name]])
+}
+
+# Calculate the overall change from 2018 to 2023 for each class and each metric
+overall_change_in_metrics <- lapply(names(metric_results), function(metric_name) {
+  df <- metric_values_df_list[[metric_name]]
+  sapply(valid_classes, function(class_val) {
+    start_value <- as.numeric(df[1, as.character(class_val)])
+    end_value <- as.numeric(df[nrow(df), as.character(class_val)])
+    print(paste("Start value for class", class_val, "in", metric_name, ":", start_value))
+    print(paste("End value for class", class_val, "in", metric_name, ":", end_value))
+    end_value - start_value
+  })
+})
+
+names(overall_change_in_metrics) <- names(metric_results)
+
+# Print the overall change from 2018 to 2023 for each class and each metric
+for (metric_name in names(metric_results)) {
+  overall_change <- overall_change_in_metrics[[metric_name]]
+  print(paste("Overall change in", metric_name, "from 2018 to 2023 for each class:"))
+  for (j in 1:length(valid_classes)) {
+    class_val <- valid_classes[j]
+    print(paste("Class", class_val, "overall change from 2018 to 2023:", overall_change[j]))
+  }
+}
+
